@@ -12,4 +12,5 @@ To run the code
 mpirun -np 4 ./weather_simulation n (Where n is the number of time steps)
 
 To increase the output file size you can increase the number of time steps n.
+
 To change the size of the grid you can change the size of NX and NY in the code.
