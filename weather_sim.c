@@ -15,18 +15,18 @@
 #define KY 0.00001 // Diffusion coefficient for Y-direction
 #define KZ 0.00001 // Diffusion coefficient for Z-direction
 
-void initializeField(double field[][NX][NY], int numSteps) {
+void initializeField(double field[], int numSteps, int local_nx) {
     srand(time(NULL));
     for (int t = 0; t < numSteps; t++) {
-        for (int i = 0; i < NX; i++) {
+        for (int i = 0; i < local_nx; i++) {
             for (int j = 0; j < NY; j++) {
-                field[t][i][j] = rand() % 100;
+                field[t * local_nx * NY + i * NY + j] = rand() % 100;
             }
         }
     }
 }
 
-void writeFieldToNetCDF(double field[][NX][NY], int numSteps, int sizeY) {
+void writeFieldToNetCDF(double field[], int numSteps, int local_nx, int rank, int num_processes) {
     char filename[50];
     sprintf(filename, "output.nc");
 
@@ -62,13 +62,18 @@ void writeFieldToNetCDF(double field[][NX][NY], int numSteps, int sizeY) {
         return;
     }
 
-    size_t start[3] = {0, 0, 0};
-    size_t count[3] = {1, NX, NY};
+    size_t start[3] = {0, rank * local_nx, 0};
+    size_t count[3] = {1, local_nx, NY};
 
     for (int t = 0; t < numSteps; t++) {
         start[0] = t;
-        count[0] = 1;
-        if ((retval = nc_put_vara_double(ncid, varid, start, count, &field[t][0][0])) != NC_NOERR) {
+        if (rank == 0) {
+            // In the case of rank 0, write data for the entire domain
+            count[1] = NX;
+        } else {
+            count[1] = local_nx;
+        }
+        if ((retval = nc_put_vara_double(ncid, varid, start, count, &field[t * local_nx * NY])) != NC_NOERR) {
             fprintf(stderr, "Error writing data to NetCDF file: %s\n", nc_strerror(retval));
             nc_close(ncid);
             return;
@@ -83,34 +88,32 @@ void writeFieldToNetCDF(double field[][NX][NY], int numSteps, int sizeY) {
     printf("Saved field data to %s\n", filename);
 }
 
-void simulateWeather(double field[][NX][NY], int rank, int num_processes, int numSteps) {
-    double tempField[numSteps][NX][NY];
+void simulateWeather(double field[], int rank, int num_processes, int numSteps, int local_nx) {
+    double tempField[numSteps][local_nx][NY];
 
     for (int t = 0; t < numSteps; t++) {
         // Advection
-        for (int i = 0; i < NX; i++) {
+        for (int i = 0; i < local_nx; i++) {
             for (int j = 0; j < NY; j++) {
-                int i_prev = ((int)(i - U0 * DT / DX + NX)) % NX;
-                int j_prev = ((int)(j - V0 * DT / DX + NY)) % NY;
-                tempField[t][i][j] = field[t][i_prev][j_prev];
+                int i_prev = ((int)(i - U0 * DT / DX + NX) + local_nx) % local_nx;
+                int j_prev = ((int)(j - V0 * DT / DX + NY) + NY) % NY;
+                tempField[t][i][j] = field[t * local_nx * NY + i * NY + j_prev];
             }
         }
 
         // Diffusion
-        for (int i = 0; i < NX; i++) {
+        for (int i = 0; i < local_nx; i++) {
             for (int j = 0; j < NY; j++) {
-                double laplacian = (field[t][(i + 1) % NX][j] + field[t][(i - 1 + NX) % NX][j]
-                                    + field[t][i][(j + 1) % NY] + field[t][i][(j - 1 + NY) % NY]
-                                    - 4 * field[t][i][j]) / (DX * DX);
+                double laplacian = (field[t * local_nx * NY + (i + 1) % local_nx * NY + j] + field[t * local_nx * NY + (i - 1 + local_nx) % local_nx * NY + j]
+                                    + field[t * local_nx * NY + i * NY + (j + 1) % NY] + field[t * local_nx * NY + i * NY + (j - 1 + NY) % NY]
+                                    - 4 * field[t * local_nx * NY + i * NY + j]) / (DX * DX);
                 tempField[t][i][j] += (KX * laplacian + KY * laplacian) * DT;
             }
         }
     }
 
     // Write the field to NetCDF
-    if (rank == 0) {
-        writeFieldToNetCDF(tempField, numSteps, NX);
-    }
+    writeFieldToNetCDF((double*)tempField, numSteps, local_nx, rank, num_processes);
 }
 
 int main(int argc, char **argv) {
@@ -142,15 +145,19 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    initializeField(field, numSteps); // Initialize the initial field for all time steps
+    int local_nx = NX / num_processes;
+
+    double local_field[numSteps * local_nx * NY];
+    initializeField(local_field, numSteps, local_nx);
 
     // Distribute the initial field to all processes
-    MPI_Bcast(&field[0][0][0], numSteps * NX * NY, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+  //  MPI_Bcast(local_field, numSteps * local_nx * NY, MPI_DOUBLE, 0, MPI_COMM_WORLD);
 
-    simulateWeather(field, rank, num_processes, numSteps);
+    simulateWeather(local_field, rank, num_processes, numSteps, local_nx);
 
     printf("Weather simulation completed.\n");
 
     MPI_Finalize();
     return 0;
 }
+
